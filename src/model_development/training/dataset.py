@@ -9,6 +9,7 @@ from pathlib import Path
 from collections import Counter
 from src.model_development.model.char_encoder import CharEncoderHelper
 from src.model_development.utils.providers.logger_provider import global_logger
+from src.model_development.utils.text_utils import turkish_lower
 
 
 class MorfessorWrapper:
@@ -28,7 +29,7 @@ class MorfessorWrapper:
 
     def segment(self, word: str) -> Tuple[List[str], float]:
         try:
-            segs, score = self.model.viterbi_segment(word.lower())
+            segs, score = self.model.viterbi_segment(turkish_lower(word))
             if len(segs) == 1:
                 confidence = 1.0
             else:
@@ -37,7 +38,7 @@ class MorfessorWrapper:
                 confidence = max(confidence, 0.3)
             return segs, confidence
         except Exception:
-            return [word.lower()], 0.3
+            return [turkish_lower(word)], 0.3
 
     def get_boundary_labels(
             self,
@@ -49,7 +50,7 @@ class MorfessorWrapper:
         segs, confidence = self.segment(word)
 
         boundaries = set()
-        pos = 1 if add_bos else 0
+        pos = (1 if add_bos else 0) - 1
         for seg in segs[:-1]:
             pos += len(seg)
             boundaries.add(pos)
@@ -59,7 +60,7 @@ class MorfessorWrapper:
             if 0 <= b < max_len - 1:
                 labels[b] = 1
 
-        root = segs[0] if segs else word.lower()
+        root = segs[0] if segs else turkish_lower(word)
         return labels, confidence, root
 
 
@@ -85,7 +86,7 @@ def build_word_vocab(
             for w in line.strip().split():
                 cleaned = clean_word_preserve_case(w)
                 if cleaned:
-                    counter[cleaned.lower()] += 1
+                    counter[turkish_lower(cleaned)] += 1
 
     items = [(w, c) for w, c in counter.items() if c >= min_freq]
     items.sort(key=lambda x: -x[1])
@@ -166,7 +167,7 @@ def build_sentence_cache(
             for w in line.strip().split():
                 cleaned = clean_word_preserve_case(w)
                 if cleaned:
-                    word_counter[cleaned.lower()] += 1
+                    word_counter[turkish_lower(cleaned)] += 1
 
     if Path(word_vocab_path).exists():
         global_logger.info(f"[build_sentence_cache] Loading word vocab: {word_vocab_path}")
@@ -231,7 +232,7 @@ def build_sentence_cache(
                 for w in chunk:
                     ids, flags, rl = helper.word_to_char_ids(w, max_len=max_word_len)
                     labels, conf, root = wrapper.get_boundary_labels(w, max_len=max_word_len)
-                    wid = word_vocab.get(w.lower(), 0)
+                    wid = word_vocab.get(turkish_lower(w), 0)
                     rid = root_vocab.get(root, 0)
                     s_char_ids.append(ids)
                     s_case_flags.append(flags)

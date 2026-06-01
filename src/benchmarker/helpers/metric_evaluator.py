@@ -3,6 +3,7 @@ import math
 from collections import Counter
 from typing import List, Callable, Set, Dict, Any
 from src.benchmarker.utils.providers.logger_provider import global_logger
+from src.benchmarker.utils.text_utils import turkish_lower
 
 
 class MetricEvaluator:
@@ -18,7 +19,7 @@ class MetricEvaluator:
         if not self.morfessor_model:
             return set()
         try:
-            segments, _ = self.morfessor_model.viterbi_segment(word.lower())
+            segments, _ = self.morfessor_model.viterbi_segment(turkish_lower(word))
             boundaries = set()
             pos = 0
             for s in segments[:-1]:
@@ -31,7 +32,7 @@ class MetricEvaluator:
     def get_boundaries(self, tokenizer_obj: Any, word: str) -> Set[int]:
         boundaries = set()
         pos = 0
-        word_lower = word.lower()
+        word_lower = turkish_lower(word)
 
         if hasattr(tokenizer_obj, "encode_as_pieces"):
             tokens = tokenizer_obj.encode_as_pieces(word_lower)
@@ -91,7 +92,7 @@ class MetricEvaluator:
                 if len(word) < 4:
                     continue
 
-                word_lower = word.lower()
+                word_lower = turkish_lower(word)
                 ref_boundaries = self._get_morfessor_boundaries(word_lower)
                 if not ref_boundaries:
                     continue

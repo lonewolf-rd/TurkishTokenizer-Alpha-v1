@@ -2,6 +2,7 @@ import pandas as pd
 from typing import List
 from pathlib import Path
 from src.benchmarker.utils.providers.logger_provider import global_logger
+from src.benchmarker.utils.text_utils import turkish_lower
 from src.benchmarker.helpers.tokenizer_trainer import TokenizerTrainer
 from src.benchmarker.helpers.metric_evaluator import MetricEvaluator
 from src.benchmarker.helpers.visualizer import ResultVisualizer
@@ -41,7 +42,7 @@ class TokenizerBenchmarker:
                 res = self.evaluator.compute_metrics(
                     name=f"{prefix}-{vs // 1000}K",
                     tokenizer_obj=model,
-                    encode_fn=lambda x, m=model: m.encode_as_pieces(x.lower()),
+                    encode_fn=lambda x, m=model: m.encode_as_pieces(turkish_lower(x)),
                     vocab=set(model.id_to_piece(i) for i in range(model.get_piece_size())),
                     test_sents=self.test_sentences
                 )
@@ -54,7 +55,7 @@ class TokenizerBenchmarker:
             res = self.evaluator.compute_metrics(
                 name=f"WordPiece-{vs // 1000}K",
                 tokenizer_obj=model,
-                encode_fn=lambda x, m=model: model.encode(x.lower()).tokens,
+                encode_fn=lambda x, m=model: model.encode(turkish_lower(x)).tokens,
                 vocab=set(model.get_vocab().keys()),
                 test_sents=self.test_sentences
             )
@@ -82,15 +83,13 @@ if __name__ == "__main__":
         "anlaşılamamaktadır",
         "hükümet",
         "teknoloji",
-        "evlerdekiler",        # ev|ler|deki|ler
-        "gidiyorum",           # git|iyor|um
-        "çalışmalarımızdan",   # çalış|ma|lar|ımız|dan
-        "muhasebeleştirme",    # muhasebe|leş|tir|me
-        "bilgisayarlarımızın", # bilgisayar|lar|ımız|ın
-        "kitap",               # tek parça — bölünmemeli
+        "evlerdekiler",
+        "gidiyorum",
+        "çalışmalarımızdan",
+        "muhasebeleştirme",
+        "bilgisayarlarımızın",
+        "kitap",
         "ev",
     ]
-    benchmarker = TokenizerBenchmarker(
-        test_sentences=HARD_TURKISH_WORDS
-    )
+    benchmarker = TokenizerBenchmarker(test_sentences=HARD_TURKISH_WORDS)
     results_df = benchmarker.run_benchmark()

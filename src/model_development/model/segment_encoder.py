@@ -42,15 +42,21 @@ class SegmentEncoder(nn.Module):
 
         p = F.pad(boundary_probs, (1, 0), value=0.0)
 
-        f = torch.zeros(B, L, max_segs, device=device, dtype=dtype)
-        f[:, 0, 0] = 1.0
+        zero_idx = torch.zeros(B, dtype=torch.long, device=device)
+        f_init = F.one_hot(zero_idx, num_classes=max_segs).to(dtype)
 
+        f_list = [f_init]
         for i in range(1, L):
             p_i = p[:, i].unsqueeze(-1)
-            no_b = f[:, i - 1, :] * (1.0 - p_i)
-            b = torch.zeros_like(f[:, i - 1, :])
-            b[:, 1:] = f[:, i - 1, :-1] * p_i
-            f[:, i, :] = no_b + b
+            prev = f_list[-1]
+            no_b = prev * (1.0 - p_i)
+            b_shifted = F.pad(prev[:, :-1], (1, 0), value=0.0)
+            b = b_shifted * p_i
+            overflow_mass = prev[:, -1:] * p_i
+            sink_pad = F.pad(overflow_mass, (max_segs - 1, 0), value=0.0)
+            f_list.append(no_b + b + sink_pad)
+
+        f = torch.stack(f_list, dim=1)
 
         if padding_mask is not None:
             f = f.masked_fill(padding_mask.unsqueeze(-1), 0.0)
@@ -63,16 +69,18 @@ class SegmentEncoder(nn.Module):
             membership: torch.Tensor,
             padding_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        char_scores = self.char_scorer(char_context).squeeze(-1)
+        char_scores = self.char_scorer(char_context).squeeze(-1).float()
         char_scores = char_scores.masked_fill(padding_mask, -1e4)
+        char_scores = char_scores.clamp(min=-30.0, max=30.0)
 
         max_scores = char_scores.max(dim=-1, keepdim=True).values
         exp_scores = (char_scores - max_scores).exp().unsqueeze(-1)
 
-        weight = membership * exp_scores
+        weight = membership.float() * exp_scores
         weight_sum = weight.sum(dim=1, keepdim=True).clamp(min=1e-8)
         weight = weight / weight_sum
 
+        weight = weight.to(char_context.dtype)
         seg_vecs = torch.einsum("bls,bld->bsd", weight, char_context)
 
         seg_mass = membership.sum(dim=1)

@@ -1,3 +1,4 @@
+import math
 import time
 import torch
 import torch.nn as nn
@@ -40,12 +41,16 @@ class TrainingConfig:
     run_name: str = "morpheus_v2"
 
     n_epochs: int = 20
-    batch_size: int = 32
-    grad_accum_steps: int = 4
-    learning_rate: float = 3e-4
+    batch_size: int = 64
+    grad_accum_steps: int = 2
+    learning_rate: float = 7e-5
+    warmup_steps: int = 1000
     weight_decay: float = 1e-2
-    grad_clip: float = 1.0
-    num_workers: int = 2
+    grad_clip: float = 0.3
+    num_workers: int = 4
+    adam_beta2: float = 0.98
+    adam_eps: float = 1e-6
+    lr_min_ratio: float = 0.2
 
     char_dim: int = 256
     char_embed_dim: int = 56
@@ -58,7 +63,8 @@ class TrainingConfig:
     max_segs: int = 8
     dropout: float = 0.1
     threshold: float = 0.5
-    pos_weight: float = 4.0
+    pos_weight: float = 2.5
+    count_loss_w: float = 0.1
 
     use_mlm: bool = True
     mlm_ctx_layers: int = 2
@@ -68,15 +74,15 @@ class TrainingConfig:
     sgns_n_negatives: int = 5
     sgns_window: int = 5
 
-    ctr_temperature: float = 0.07
+    ctr_temperature: float = 0.10
 
     aux_weight_start: float = 0.5
-    aux_weight_end: float = 0.05
-    aux_weight_decay: float = 0.85
+    aux_weight_end: float = 0.10
+    aux_weight_decay: float = 0.92
 
-    sgns_weight: float = 1.0
+    sgns_weight: float = 0.7
     ctr_weight: float = 0.5
-    mlm_weight: float = 1.0
+    mlm_weight: float = 0.7
 
     use_amp: bool = True
 
@@ -117,6 +123,7 @@ class MorpheusTrainer:
             dropout=config.dropout,
             threshold=config.threshold,
             pos_weight=config.pos_weight,
+            count_loss_w=config.count_loss_w,
         ).to(self.device)
         self.model.parameter_summary()
 
@@ -169,25 +176,69 @@ class MorpheusTrainer:
             "mlm": config.mlm_weight if config.use_mlm else 0.0,
         }
 
-        all_params = list(self.model.parameters()) + list(self.sgns_loss.parameters())
+        module_list = [self.model, self.sgns_loss]
         if self.mlm_head is not None:
-            all_params += list(self.mlm_head.parameters())
-        self.all_params = [p for p in all_params if p.requires_grad]
+            module_list.append(self.mlm_head)
+
+        decay_params = []
+        no_decay_params = []
+        for module in module_list:
+            for name, param in module.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if (
+                    name.endswith(".bias")
+                    or "norm" in name.lower()
+                    or "embedding" in name.lower()
+                    or name == "mask_token"
+                ):
+                    no_decay_params.append(param)
+                else:
+                    decay_params.append(param)
+
+        self.all_params = decay_params + no_decay_params
+        global_logger.info(
+            f"[Trainer] Param groups: decay={len(decay_params):,} "
+            f"no_decay={len(no_decay_params):,}"
+        )
 
         self.optimizer = torch.optim.AdamW(
-            self.all_params,
+            [
+                {"params": decay_params, "weight_decay": config.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
             lr=config.learning_rate,
-            weight_decay=config.weight_decay,
+            betas=(0.9, config.adam_beta2),
+            eps=config.adam_eps,
         )
 
         steps_per_epoch = max(1, len(self.train_dataset) // (config.batch_size * config.grad_accum_steps))
-        self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        total_steps = config.n_epochs * steps_per_epoch
+        warmup_steps = min(config.warmup_steps, total_steps // 4)
+
+        lr_floor = config.lr_min_ratio
+        lr_span = 1.0 - lr_floor
+
+        def _lr_lambda(step: int) -> float:
+            if step < warmup_steps:
+                return float(step + 1) / float(max(1, warmup_steps))
+            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+            progress = min(max(progress, 0.0), 1.0)
+            return lr_floor + lr_span * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer,
-            T_max=config.n_epochs * steps_per_epoch,
-            eta_min=config.learning_rate * 0.1,
+            lr_lambda=_lr_lambda,
         )
 
-        self.scaler = GradScaler(device="cuda", enabled=(config.use_amp and self.device.type == "cuda"))
+        self.scaler = GradScaler(
+            device="cuda",
+            enabled=(config.use_amp and self.device.type == "cuda"),
+            init_scale=2**10,
+            growth_factor=2.0,
+            backoff_factor=0.5,
+            growth_interval=4000,
+        )
 
         self.current_epoch = 0
         self.global_step = 0
@@ -285,10 +336,32 @@ class MorpheusTrainer:
 
         running_info: Dict[str, float] = {}
 
+        nan_skips = 0
         for micro_step, batch in enumerate(loader):
             with autocast(device_type="cuda", enabled=self.config.use_amp and self.device.type == "cuda"):
                 out = self._compute_loss(batch)
                 loss = out["loss"] / accum
+
+            if not torch.isfinite(loss):
+                nan_skips += 1
+                if nan_skips % 25 == 1:
+                    info = out["info"]
+                    culprits = []
+                    for k in ("aux_loss", "sgns_sgns_loss", "ctr_contrastive_loss", "mlm_mlm_loss"):
+                        v = info.get(k, 0.0)
+                        if not (v == v) or v in (float("inf"), float("-inf")):
+                            culprits.append(k)
+                    cur_scale = self.scaler.get_scale() if self.scaler.is_enabled() else 1.0
+                    global_logger.warning(
+                        f"[Trainer] Non-finite loss at step {self.global_step} "
+                        f"(skipped {nan_skips}; scale={cur_scale:.0f}; "
+                        f"culprits={culprits or 'unknown'})"
+                    )
+                if self.scaler.is_enabled():
+                    new_scale = max(1.0, self.scaler.get_scale() * 0.5)
+                    self.scaler._scale.fill_(new_scale)
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
 
             self.scaler.scale(loss).backward()
             n_micro += 1
@@ -407,7 +480,7 @@ class MorpheusTrainer:
         global_logger.info(f"[Trainer] Saved checkpoint: {path}")
 
     def load_checkpoint(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state"])
         self.sgns_loss.load_state_dict(ckpt["sgns_state"])
         if self.mlm_head is not None and "mlm_head_state" in ckpt:
@@ -460,13 +533,14 @@ if __name__ == "__main__":
         val_cache_path=test_cache,
         word_vocab_path=word_vocab_path,
         checkpoint_dir=checkpoint_dir,
-        run_name="morpheus_v2",
-        batch_size=32,
-        grad_accum_steps=4,
-        n_epochs=15,
-        learning_rate=3e-4,
+        run_name="turkish_morpheus",
+        batch_size=64,
+        grad_accum_steps=2,
+        n_epochs=18,
+        learning_rate=1e-4,
+        warmup_steps=1000,
         use_amp=True,
-        num_workers=2,
+        num_workers=4,
         use_mlm=True,
     )
 

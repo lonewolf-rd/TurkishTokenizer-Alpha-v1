@@ -1,4 +1,6 @@
 from src.model_development.utils.providers.logger_provider import global_logger
+from src.model_development.utils.text_utils import turkish_lower
+from src.model_development.model.boundary_detector import RotaryEmbedding
 from typing import Tuple, Dict, Union, Optional, List
 import torch.nn.functional as F
 import torch.nn as nn
@@ -64,7 +66,7 @@ class CharEncoderHelper:
 
         reserved = 2 if (add_bos and add_eos) else (1 if (add_bos or add_eos) else 0)
         for c in word[: max_len - reserved]:
-            lower = c.lower()
+            lower = turkish_lower(c)
             is_upper = 1 if lower != c else 0
             id_list.append(self.char_vocab.get(lower, self._UNK_ID))
             case_list.append(is_upper)
@@ -132,6 +134,7 @@ class LocalSelfAttention(nn.Module):
             num_heads: int = 4,
             dropout: float = 0.1,
             window_size: int = None,
+            max_seq_len: int = 64,
     ):
         super().__init__()
 
@@ -146,6 +149,8 @@ class LocalSelfAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(dim)
 
+        self.rope = RotaryEmbedding(dim=self.head_dim, max_seq_len=max_seq_len)
+
     def forward(
             self,
             x: torch.Tensor,
@@ -158,6 +163,8 @@ class LocalSelfAttention(nn.Module):
         qkv = self.qkv(x).chunk(3, dim=-1)
         q, k, v = [t.view(B, S, self.num_heads, self.head_dim)
                    .transpose(1, 2) for t in qkv]
+
+        q, k = self.rope(q, k)
 
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 

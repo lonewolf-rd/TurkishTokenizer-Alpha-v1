@@ -242,16 +242,24 @@ class WandBCallback(Callback):
                 "epoch": epoch + 1,
             }
 
-            boundary_acc = self._compute_boundary_accuracy(trainer)
-            if boundary_acc is not None:
-                log_dict["epoch/boundary_accuracy"] = boundary_acc
+            bm = self._compute_boundary_metrics(trainer)
+            if bm is not None:
+                log_dict["epoch/boundary_accuracy"] = bm["accuracy"]
+                log_dict["epoch/boundary_precision"] = bm["precision"]
+                log_dict["epoch/boundary_recall"] = bm["recall"]
+                log_dict["epoch/boundary_f1"] = bm["f1"]
+                global_logger.info(
+                    f"[WandB] Boundary metrics: "
+                    f"acc={bm['accuracy']:.3f} P={bm['precision']:.3f} "
+                    f"R={bm['recall']:.3f} F1={bm['f1']:.3f}"
+                )
 
             wandb.log(log_dict, step=trainer.global_step)
 
         except Exception as e:
             global_logger.error(f"[WandB] Epoch log error: {e}")
 
-    def _compute_boundary_accuracy(self, trainer) -> Optional[float]:
+    def _compute_boundary_metrics(self, trainer) -> Optional[Dict]:
         try:
             import torch
             from torch.utils.data import DataLoader
@@ -264,8 +272,10 @@ class WandBCallback(Callback):
             )
 
             trainer.model.eval()
-            total_correct = 0
-            total_valid = 0
+            tp = 0
+            fp = 0
+            fn = 0
+            tn = 0
             n_seen = 0
             max_batches = 16
 
@@ -294,14 +304,32 @@ class WandBCallback(Callback):
                     )
                     hard = out["hard_boundaries"].long()
                     valid = (~flat_pad[:, :-1]) & (~flat_pad[:, 1:])
-                    total_correct += ((hard == flat_labels) & valid).sum().item()
-                    total_valid += valid.sum().item()
+                    pred = hard[valid]
+                    true = flat_labels[valid]
+                    tp += ((pred == 1) & (true == 1)).sum().item()
+                    fp += ((pred == 1) & (true == 0)).sum().item()
+                    fn += ((pred == 0) & (true == 1)).sum().item()
+                    tn += ((pred == 0) & (true == 0)).sum().item()
 
             trainer.model.train()
-            return total_correct / max(total_valid, 1)
+            total = tp + fp + fn + tn
+            acc = (tp + tn) / max(total, 1)
+            precision = tp / max(tp + fp, 1)
+            recall = tp / max(tp + fn, 1)
+            f1 = 2 * precision * recall / max(precision + recall, 1e-8)
+            return {
+                "accuracy": acc,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "tn": tn,
+            }
 
         except Exception as e:
-            global_logger.error(f"[WandB] Boundary accuracy failed: {e}")
+            global_logger.error(f"[WandB] Boundary metrics failed: {e}")
             return None
 
     def on_train_end(self, trainer):

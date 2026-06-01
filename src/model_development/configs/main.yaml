@@ -5,5 +5,5 @@ dataset:
   shuffle_before_merge: true
 
 huggingface:
-  access_token: "hf---"
+  access_token: ""
 

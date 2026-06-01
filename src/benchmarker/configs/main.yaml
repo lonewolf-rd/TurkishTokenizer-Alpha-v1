@@ -1,11 +1,11 @@
 dataset:
-  limit_mb: 1024
+  limit_mb: 2048
   fetch_wiki: true
   fetch_oscar: false
   shuffle_before_merge: true
 
 huggingface:
-  access_token: "hf---"
+  access_token: ""
 
 training:
   vocab_size: [8000, 16000, 32000, 40000, 64000]

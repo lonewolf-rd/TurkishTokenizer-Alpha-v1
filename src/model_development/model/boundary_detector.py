@@ -133,6 +133,8 @@ class MorfemAuxLoss(nn.Module):
             valid_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, dict]:
 
+        boundary_logits = boundary_logits.float().clamp(min=-30.0, max=30.0)
+
         bce = F.binary_cross_entropy_with_logits(
             boundary_logits,
             morfessor_labels.float(),
@@ -142,9 +144,12 @@ class MorfemAuxLoss(nn.Module):
 
         if valid_mask is not None:
             vm = valid_mask.float()
-            bce_per_word = (bce * vm).sum(dim=-1) / vm.sum(dim=-1).clamp(min=1.0)
+            valid_per_word = vm.sum(dim=-1)
+            bce_per_word = (bce * vm).sum(dim=-1) / valid_per_word.clamp(min=1.0)
+            word_has_content = (valid_per_word > 0).float()
         else:
             bce_per_word = bce.mean(dim=-1)
+            word_has_content = torch.ones_like(bce_per_word)
 
         pred_count = torch.sigmoid(boundary_logits)
         if valid_mask is not None:
@@ -158,14 +163,20 @@ class MorfemAuxLoss(nn.Module):
 
         if confidence_weights is not None:
             per_word_loss = confidence_weights * bce_per_word + self.count_loss_w * count_per_word
+            real_word_mask = (confidence_weights > 0).float() * word_has_content
         else:
             per_word_loss = bce_per_word + self.count_loss_w * count_per_word
+            real_word_mask = word_has_content
 
-        total_loss = per_word_loss.mean()
+        n_real = real_word_mask.sum().clamp(min=1.0)
+        total_loss = (per_word_loss * real_word_mask).sum() / n_real
+
+        bce_mean = (bce_per_word * real_word_mask).sum() / n_real
+        count_mean = (count_per_word * real_word_mask).sum() / n_real
 
         loss_dict = {
-            "bce_loss": bce_per_word.mean().item(),
-            "count_loss": count_per_word.mean().item(),
+            "bce_loss": bce_mean.item(),
+            "count_loss": count_mean.item(),
             "total_aux": total_loss.item(),
         }
 
@@ -181,6 +192,7 @@ class BoundaryDetector(nn.Module):
             threshold: float = 0.5,
             dropout: float = 0.1,
             pos_weight: float = 4.0,
+            count_loss_w: float = 0.3,
             depth_weights: Optional[List[float]] = None,
     ):
         super().__init__()
@@ -189,7 +201,7 @@ class BoundaryDetector(nn.Module):
         self.n_layers = n_layers
 
         if depth_weights is None:
-            depth_weights = [0.3 + 0.7 * (i + 1) / n_layers for i in range(n_layers)]
+            depth_weights = [0.85 + 0.15 * (i + 1) / n_layers for i in range(n_layers)]
         assert len(depth_weights) == n_layers
         self.register_buffer(
             "depth_weights",
@@ -217,7 +229,10 @@ class BoundaryDetector(nn.Module):
             for _ in range(n_layers)
         ])
 
-        self.aux_loss_fn = MorfemAuxLoss(pos_weight=pos_weight)
+        self.aux_loss_fn = MorfemAuxLoss(
+            pos_weight=pos_weight,
+            count_loss_w=count_loss_w,
+        )
 
     def forward(
             self,
@@ -253,7 +268,7 @@ class BoundaryDetector(nn.Module):
             else:
                 valid = None
 
-            total_aux = 0.0
+            total_aux = char_context.new_zeros(())
             agg_dict = {"bce_loss": 0.0, "count_loss": 0.0, "per_layer_aux": []}
             for layer_idx, logits in enumerate(all_logits):
                 layer_loss, layer_dict = self.aux_loss_fn(

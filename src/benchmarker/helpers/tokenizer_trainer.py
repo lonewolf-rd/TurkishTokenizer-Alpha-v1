@@ -1,6 +1,7 @@
 from tokenizers import (Tokenizer,models,trainers,pre_tokenizers,normalizers,decoders)
 from src.benchmarker.utils.providers.config_provider import config_provider
 from src.benchmarker.utils.providers.logger_provider import global_logger
+from src.benchmarker.utils.text_utils import turkish_lower
 from collections import Counter
 from pathlib import Path
 from typing import Union, Tuple, List
@@ -16,19 +17,56 @@ class TokenizerTrainer:
     def __init__(self):
         self.vocab_size = config_provider.cfg.training.vocab_size
         self.turkish_sample_list: List[str] = [
-            "gidebileceklerindenmişsiniz",
-            "evlerdekiler",
-            "çalışmalarımızdan",
-            "üniversitesinde",
-            "karşılaştırılamayacak",
-            "bilgisayarlarımızın",
-            "evlerdekiler",
-            "gidiyorum",
-            "çalışmalarımızdan",
-            "muhasebeleştirme",
-            "bilgisayarlarımızın",
-            "kitap",
             "ev",
+            "kitap",
+            "su",
+            "ay",
+            "göz",
+            "baş",
+            "evler",
+            "kitaplar",
+            "gözler",
+            "evde",
+            "evlerde",
+            "evden",
+            "evlerden",
+            "eve",
+            "evler",
+            "evim",
+            "evimiz",
+            "evimde",
+            "evlerimiz",
+            "evlerimizde",
+            "evlerimizdeki",
+            "evlerimizdekiler",
+            "kitabım",
+            "kitabımdaki",
+            "geldi",
+            "geldim",
+            "geliyorum",
+            "geliyorduk",
+            "gelmedim",
+            "gelirim",
+            "gelirsen",
+            "gelecek",
+            "gelmişti",
+            "yaptırmak",
+            "yapılmıştı",
+            "görünmek",
+            "görünmüyor",
+            "İstanbul",
+            "İstanbul'da",
+            "Irak",
+            "TBMM",
+            "muhasebeleştirme",
+            "muvaffakiyetsizleştiriciler",
+            "karşılaştırılamayacak",
+            "gidebileceklerindenmişsiniz",
+            "üniversitelerindeki",
+            "bilgisayarlarımızın",
+            "çalışmalarımızdan",
+            "anlaşılamamaktadır",
+            "görevlendirilemeyeceklerinden",
         ]
         os.environ["HF_TOKEN"] = config_provider.cfg.huggingface.access_token
 
@@ -39,7 +77,7 @@ class TokenizerTrainer:
 
             with open(self._DEFAULT_CORPUS_PATH, "r", encoding="utf-8") as f:
                 for line in f:
-                    word_counter.update(line.lower().split())
+                    word_counter.update(turkish_lower(line).split())
 
             training_data = [(count, word) for word, count in word_counter.items()]
             global_logger.info(f"[TokenizerTrainer](prepare_word_count) Unique words prepared: {len(training_data):,}")
@@ -74,22 +112,22 @@ class TokenizerTrainer:
         try:
             morph_train_data = self.prepare_word_count()
             morph_model = morfessor.BaselineModel(
-                corpusweight=0.7,
+                corpusweight=1.0,
                 use_skips=False,
             )
 
-            global_logger.info("[TokenizerTrainer] Batch training başlıyor...")
+            global_logger.info("[TokenizerTrainer] Batch training başlıyor (corpusweight=1.0, max_epochs=20)...")
             morph_model.train_batch(
                 morph_train_data,
                 finish_threshold=0.005,
-                max_epochs=10,
+                max_epochs=20,
             )
 
             if use_online:
-                global_logger.info("[TokenizerTrainer] Online refinement başlıyor...")
+                global_logger.info("[TokenizerTrainer] Online refinement başlıyor (max_epochs=5)...")
                 morph_model.train_online(
                     iter(morph_train_data),
-                    max_epochs=3,
+                    max_epochs=5,
                 )
 
             model_file = self._DEFAULT_OUTPUT_PATH / "morfessor_model.bin"
@@ -107,10 +145,10 @@ class TokenizerTrainer:
 
 
     def _run_sanity_check(self, model: morfessor.BaselineModel):
-        global_logger.info("[TokenizerTrainer](sanity_check) Testing model on complex Turkish words:")
+        global_logger.info("[TokenizerTrainer](sanity_check) Testing model on Turkish morphology:")
         for word in self.turkish_sample_list:
-            segments, _ = model.viterbi_segment(word.lower())
-            global_logger.info(f"  {word} -> {' | '.join(segments)}")
+            segments, _ = model.viterbi_segment(turkish_lower(word))
+            global_logger.info(f"  {word:35s} -> {' | '.join(segments)}")
 
     def train_bpe(self, vocab_sizes: List[int] = config_provider.cfg.training.vocab_size) -> List[spm.SentencePieceProcessor]:
         trained_processors = []

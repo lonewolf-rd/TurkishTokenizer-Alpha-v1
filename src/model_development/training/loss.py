@@ -44,6 +44,7 @@ class SkipGramLoss(nn.Module):
             word_ids: torch.Tensor,
             attention_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
+        word_embeddings = word_embeddings.float()
         B, T, D = word_embeddings.shape
         device = word_embeddings.device
 
@@ -69,8 +70,8 @@ class SkipGramLoss(nn.Module):
                 if n_valid == 0:
                     continue
 
-                pos_ctx = self.context_embedding(ctx_ids)
-                pos_score = (centers * pos_ctx).sum(-1)
+                pos_ctx = self.context_embedding(ctx_ids).float()
+                pos_score = (centers * pos_ctx).sum(-1).clamp(min=-30.0, max=30.0)
                 pos_l = -F.logsigmoid(pos_score)
                 total_pos_loss = total_pos_loss + (pos_l * valid.float()).sum()
                 n_pairs += n_valid
@@ -82,8 +83,8 @@ class SkipGramLoss(nn.Module):
                 ).view(n_valid, self.n_negatives)
 
                 valid_centers = centers[valid]
-                neg_ctx = self.context_embedding(neg_ids)
-                neg_score = (valid_centers.unsqueeze(1) * neg_ctx).sum(-1)
+                neg_ctx = self.context_embedding(neg_ids).float()
+                neg_score = (valid_centers.unsqueeze(1) * neg_ctx).sum(-1).clamp(min=-30.0, max=30.0)
                 total_neg_loss = total_neg_loss + (-F.logsigmoid(-neg_score)).sum()
 
         if n_pairs == 0:
@@ -113,6 +114,7 @@ class RootFamilyContrastiveLoss(nn.Module):
             root_ids: torch.Tensor,
             valid_mask: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict]:
+        word_embeddings = word_embeddings.float()
         device = word_embeddings.device
         N = word_embeddings.size(0)
 
@@ -140,7 +142,7 @@ class RootFamilyContrastiveLoss(nn.Module):
             zero = word_embeddings.sum() * 0.0
             return zero, {"contrastive_loss": 0.0, "n_anchors": 0, "avg_n_pos": 0.0}
 
-        log_prob = sim - sim.logsumexp(dim=-1, keepdim=True)
+        log_prob = sim - torch.logsumexp(sim, dim=-1, keepdim=True)
         n_pos_per = pos_mask.float().sum(dim=-1).clamp(min=1.0)
         loss_per = -(log_prob * pos_mask.float()).sum(dim=-1) / n_pos_per
 

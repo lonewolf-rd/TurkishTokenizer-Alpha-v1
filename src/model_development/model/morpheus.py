@@ -21,6 +21,7 @@ class Morpheus(nn.Module):
             dropout: float = 0.1,
             threshold: float = 0.5,
             pos_weight: float = 4.0,
+            count_loss_w: float = 0.3,
     ):
         super().__init__()
 
@@ -44,6 +45,7 @@ class Morpheus(nn.Module):
             threshold=threshold,
             dropout=dropout,
             pos_weight=pos_weight,
+            count_loss_w=count_loss_w,
         )
 
         self.segment_encoder = SegmentEncoder(
